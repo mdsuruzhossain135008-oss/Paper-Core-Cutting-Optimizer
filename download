@@ -1,0 +1,127 @@
+export interface SetupRoll {
+  id: string;
+  width: number;
+}
+
+export interface SetupItem {
+  id: string;
+  repetitions: number;
+  extra: number;
+  rolls: SetupRoll[];
+}
+
+export interface OptimizationResult {
+  size: number;
+  cuts: number[];
+  used: number;
+  scrap: number;
+  qty: number;
+}
+
+export function optimizeCuts(
+  setups: SetupItem[],
+  motherCores: number[],
+  minScrap: number,
+  maxWaste: number
+): OptimizationResult[] {
+  // 1. Flatten required cuts
+  let requiredCuts: number[] = [];
+  setups.forEach(setup => {
+    if (setup.repetitions > 0) {
+      setup.rolls.forEach(roll => {
+        const finalCut = Number(roll.width) + Number(setup.extra);
+        if (finalCut > 0) {
+          for (let i = 0; i < setup.repetitions; i++) {
+            requiredCuts.push(finalCut);
+          }
+        }
+      });
+    }
+  });
+
+  // Sort descending
+  requiredCuts.sort((a, b) => b - a);
+
+  if (requiredCuts.length === 0) return [];
+
+  let availableCores = [...motherCores];
+  let usedCores: Omit<OptimizationResult, 'qty'>[] = [];
+
+  while (requiredCuts.length > 0) {
+    let bestPacking: { coreSize: number, cuts: number[], scrap: number, score: number } | null = null;
+
+    // Try each available mother core type
+    for (let i = 0; i < availableCores.length; i++) {
+      const coreSize = availableCores[i];
+
+      // Try to pack remaining cuts into this core
+      let currentCuts: number[] = [];
+      let currentUsed = 0;
+      let remainingCopy = [...requiredCuts];
+
+      for (let j = 0; j < remainingCopy.length; j++) {
+        const cut = remainingCopy[j];
+        // Check if it fits AND leaves enough room for minScrap
+        if (coreSize - (currentUsed + cut) >= minScrap) {
+          currentCuts.push(cut);
+          currentUsed += cut;
+          remainingCopy.splice(j, 1);
+          j--; // Adjust index after removal
+        }
+      }
+
+      if (currentCuts.length > 0) {
+        const scrap = coreSize - currentUsed;
+        const utilization = currentUsed / coreSize;
+        const meetsMaxWaste = scrap <= maxWaste;
+        
+        // Score: Primary is meeting maxWaste, Secondary is utilization, Tertiary is smaller core size
+        const score = (meetsMaxWaste ? 10000 : 0) + utilization * 100 - (coreSize / 10000);
+
+        if (!bestPacking || score > bestPacking.score) {
+          bestPacking = {
+            coreSize,
+            cuts: currentCuts,
+            scrap,
+            score
+          };
+        }
+      }
+    }
+
+    if (!bestPacking) {
+      throw new Error(`Cannot pack remaining cuts (largest is ${requiredCuts[0]}mm). They might be too large for available stock considering the ${minScrap}mm minimum scrap.`);
+    }
+
+    // Apply the best packing
+    usedCores.push({
+      size: bestPacking.coreSize,
+      cuts: bestPacking.cuts,
+      used: bestPacking.coreSize - bestPacking.scrap,
+      scrap: bestPacking.scrap
+    });
+
+    // Remove packed cuts from requiredCuts
+    for (const cut of bestPacking.cuts) {
+      const idx = requiredCuts.indexOf(cut);
+      if (idx !== -1) {
+        requiredCuts.splice(idx, 1);
+      }
+    }
+  }
+
+  // Group identical cores
+  const groups: Record<string, OptimizationResult> = {};
+  usedCores.forEach(core => {
+    const signature = `${core.size}-${core.cuts.slice().sort().join(',')}`;
+    if (!groups[signature]) {
+      groups[signature] = {
+        ...core,
+        qty: 0
+      };
+    }
+    groups[signature].qty += 1;
+  });
+
+  return Object.values(groups).sort((a, b) => b.size - a.size);
+}

@@ -1,0 +1,573 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { Plus, Trash2, Settings, Scissors, BarChart3, Download, Printer, RotateCcw, AlertTriangle, CheckCircle2, Factory, X } from 'lucide-react';
+import { optimizeCuts, SetupItem, OptimizationResult } from './lib/optimizer';
+
+const DEFAULT_SETUPS: SetupItem[] = [{ 
+  id: '1', 
+  repetitions: 10, 
+  extra: 5, 
+  rolls: [{ id: 'r1', width: 320 }] 
+}];
+
+const MASTER_CORES = [
+  { id: '3', supplier: 'Local', wall: 10, size: 1005 },
+  { id: '3', supplier: 'Local', wall: 10, size: 1025 },
+  { id: '3', supplier: 'Local', wall: 10, size: 1105 },
+  { id: '3', supplier: 'Local', wall: 10, size: 1205 },
+  { id: '3', supplier: 'Local', wall: 10, size: 1255 },
+  { id: '3', supplier: 'Local', wall: 10, size: 1524 },
+  { id: '3', supplier: 'Local', wall: 10, size: 705 },
+  { id: '3', supplier: 'Local', wall: 10, size: 765 },
+  { id: '3', supplier: 'Local', wall: 10, size: 805 },
+  { id: '3', supplier: 'Local', wall: 10, size: 825 },
+  { id: '3', supplier: 'Local', wall: 10, size: 845 },
+  { id: '3', supplier: 'Local', wall: 10, size: 855 },
+  { id: '3', supplier: 'Local', wall: 10, size: 870 },
+  { id: '3', supplier: 'Local', wall: 10, size: 905 },
+  { id: '3', supplier: 'Local', wall: 10, size: 955 },
+  { id: '3', supplier: 'Local', wall: 10, size: 995 },
+  { id: '3', supplier: 'Local', wall: 14, size: 1025 },
+  { id: '3', supplier: 'Local', wall: 14, size: 1105 },
+  { id: '3', supplier: 'Local', wall: 14, size: 1524 },
+  { id: '6', supplier: 'Import', wall: 16, size: 1600 },
+  { id: '6', supplier: 'Import', wall: 12, size: 2900 },
+  { id: '6', supplier: 'Import', wall: 16, size: 2900 },
+  { id: '3', supplier: 'Import', wall: 12, size: 2900 },
+];
+
+export default function App() {
+  // State
+  const [setups, setSetups] = useState<SetupItem[]>(DEFAULT_SETUPS);
+  const [innerDiameter, setInnerDiameter] = useState('3');
+  const [supplier, setSupplier] = useState('Local');
+  const [wallThickness, setWallThickness] = useState<number>(10);
+  const [minScrap, setMinScrap] = useState<number>(80);
+  const [maxWaste, setMaxWaste] = useState<number>(200);
+  const [selectedCores, setSelectedCores] = useState<Record<number, boolean>>({});
+  
+  const [results, setResults] = useState<OptimizationResult[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+
+  // Derived State
+  const filteredCores = useMemo(() => {
+    const sizes = MASTER_CORES.filter(c => 
+      c.id === innerDiameter && 
+      c.supplier === supplier && 
+      c.wall === wallThickness
+    ).map(c => c.size);
+    return Array.from(new Set(sizes)).sort((a, b) => a - b);
+  }, [innerDiameter, supplier, wallThickness]);
+
+  // Load from localStorage on mount
+  useEffect(() => {
+    const saved = localStorage.getItem('paperCoreOptimizerStateV4');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (parsed.setups) setSetups(parsed.setups);
+        if (parsed.innerDiameter) setInnerDiameter(parsed.innerDiameter);
+        if (parsed.supplier) setSupplier(parsed.supplier);
+        if (parsed.wallThickness) setWallThickness(parsed.wallThickness);
+        if (parsed.minScrap) setMinScrap(parsed.minScrap);
+        if (parsed.maxWaste) setMaxWaste(parsed.maxWaste);
+        if (parsed.selectedCores) setSelectedCores(parsed.selectedCores);
+      } catch (e) {
+        console.error("Failed to load saved state", e);
+      }
+    }
+  }, []);
+
+  // Save to localStorage on change
+  useEffect(() => {
+    localStorage.setItem('paperCoreOptimizerStateV4', JSON.stringify({
+      setups, innerDiameter, supplier, wallThickness, minScrap, maxWaste, selectedCores
+    }));
+  }, [setups, innerDiameter, supplier, wallThickness, minScrap, maxWaste, selectedCores]);
+
+  // Handlers
+  const addSetup = () => {
+    setSetups([...setups, { id: Date.now().toString(), repetitions: 1, extra: 0, rolls: [{ id: Date.now().toString() + '-r', width: 0 }] }]);
+  };
+
+  const updateSetup = (id: string, field: keyof SetupItem, value: number) => {
+    setSetups(setups.map(s => s.id === id ? { ...s, [field]: value } : s));
+  };
+
+  const removeSetup = (id: string) => {
+    setSetups(setups.filter(s => s.id !== id));
+  };
+
+  const addRoll = (setupId: string) => {
+    setSetups(setups.map(s => {
+      if (s.id === setupId) {
+        return { ...s, rolls: [...s.rolls, { id: Date.now().toString(), width: 0 }] };
+      }
+      return s;
+    }));
+  };
+
+  const updateRoll = (setupId: string, rollId: string, width: number) => {
+    setSetups(setups.map(s => {
+      if (s.id === setupId) {
+        return { ...s, rolls: s.rolls.map(r => r.id === rollId ? { ...r, width } : r) };
+      }
+      return s;
+    }));
+  };
+
+  const removeRoll = (setupId: string, rollId: string) => {
+    setSetups(setups.map(s => {
+      if (s.id === setupId) {
+        return { ...s, rolls: s.rolls.filter(r => r.id !== rollId) };
+      }
+      return s;
+    }));
+  };
+
+  const handleOptimize = () => {
+    setError(null);
+    try {
+      const motherCoresForOpt = filteredCores.filter(size => selectedCores[size] !== false);
+
+      if (motherCoresForOpt.length === 0) {
+        throw new Error("No mother cores selected. Please select at least one available size.");
+      }
+
+      const res = optimizeCuts(setups, motherCoresForOpt, minScrap, maxWaste);
+      setResults(res);
+    } catch (err: any) {
+      setError(err.message || "Optimization failed.");
+      setResults(null);
+    }
+  };
+
+  const handleReset = () => {
+    setShowResetConfirm(true);
+  };
+
+  const confirmReset = () => {
+    setSetups(DEFAULT_SETUPS);
+    setInnerDiameter('3');
+    setSupplier('Local');
+    setWallThickness(10);
+    setMinScrap(80);
+    setMaxWaste(200);
+    setSelectedCores({});
+    setResults(null);
+    setError(null);
+    setShowResetConfirm(false);
+  };
+
+  const handlePrint = () => {
+    window.print();
+  };
+
+  const handleExportCSV = () => {
+    if (!results) return;
+    
+    let csvContent = "data:text/csv;charset=utf-8,";
+    csvContent += "Suggested Mother Core (mm),Qty,Cuts per Mother Core,Remaining Scrap (mm),Utilization (%)\n";
+    
+    results.forEach(r => {
+      const cutsStr = r.cuts.join(' | ');
+      const utilization = ((r.used / r.size) * 100).toFixed(2);
+      csvContent += `${r.size},${r.qty},"${cutsStr}",${r.scrap},${utilization}%\n`;
+    });
+
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", "cutting_optimization_report.csv");
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // Summary Calculations
+  const totalRequiredLength = setups.reduce((sum, setup) => {
+    const setupLength = setup.rolls.reduce((rollSum, roll) => rollSum + (roll.width + setup.extra), 0);
+    return sum + (setupLength * setup.repetitions);
+  }, 0);
+  const totalMotherCoreUsed = results ? results.reduce((sum, r) => sum + (r.size * r.qty), 0) : 0;
+  const totalWaste = results ? results.reduce((sum, r) => sum + (r.scrap * r.qty), 0) : 0;
+  const wastePercent = totalMotherCoreUsed > 0 ? ((totalWaste / totalMotherCoreUsed) * 100).toFixed(2) : '0.00';
+  const efficiencyPercent = totalMotherCoreUsed > 0 ? (((totalMotherCoreUsed - totalWaste) / totalMotherCoreUsed) * 100).toFixed(2) : '0.00';
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-800 font-sans print:bg-white">
+      {/* Header */}
+      <header className="bg-blue-900 text-white shadow-md print:hidden">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex flex-col sm:flex-row justify-between items-center">
+          <div className="flex items-center space-x-3 mb-4 sm:mb-0">
+            <Factory className="h-8 w-8 text-blue-300" />
+            <h1 className="text-2xl font-bold tracking-tight">Paper Core Cutting Optimizer</h1>
+          </div>
+          <div className="flex space-x-2">
+            <button onClick={handleExportCSV} disabled={!results} className="flex items-center px-3 py-2 bg-blue-800 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-md text-sm font-medium transition-colors">
+              <Download className="h-4 w-4 mr-2" /> Export CSV
+            </button>
+            <button onClick={handlePrint} disabled={!results} className="flex items-center px-3 py-2 bg-blue-800 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-md text-sm font-medium transition-colors">
+              <Printer className="h-4 w-4 mr-2" /> Print
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {error && (
+          <div className="mb-6 p-4 bg-red-50 border-l-4 border-red-500 text-red-700 flex items-start rounded-r-md shadow-sm print:hidden">
+            <AlertTriangle className="h-5 w-5 mr-3 flex-shrink-0 mt-0.5" />
+            <div>
+              <h3 className="font-bold">Optimization Error</h3>
+              <p>{error}</p>
+            </div>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+          {/* Left Column: Inputs */}
+          <div className="lg:col-span-5 space-y-6 print:hidden">
+            
+            {/* Core Specs & Constraints */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+              <section className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden">
+                <div className="bg-slate-100 px-4 py-3 border-b border-slate-200">
+                  <h2 className="text-lg font-semibold text-slate-800 flex items-center">
+                    <Settings className="h-5 w-5 mr-2 text-blue-600" /> Core Specs
+                  </h2>
+                </div>
+                <div className="p-4 space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Inner Diameter</label>
+                    <select value={innerDiameter} onChange={(e) => setInnerDiameter(e.target.value)} className="w-full p-2 border border-slate-300 rounded-md focus:ring-blue-500 focus:border-blue-500">
+                      <option value="3">3 inch</option>
+                      <option value="6">6 inch</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Supplier</label>
+                    <select value={supplier} onChange={(e) => setSupplier(e.target.value)} className="w-full p-2 border border-slate-300 rounded-md focus:ring-blue-500 focus:border-blue-500">
+                      <option value="Local">Local</option>
+                      <option value="Import">Import</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Wall Thickness (mm)</label>
+                    <input type="number" min="1" value={wallThickness} onChange={(e) => setWallThickness(parseFloat(e.target.value) || 0)} className="w-full p-2 border border-slate-300 rounded-md focus:ring-blue-500 focus:border-blue-500" />
+                  </div>
+                </div>
+              </section>
+
+              <section className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden">
+                <div className="bg-slate-100 px-4 py-3 border-b border-slate-200">
+                  <h2 className="text-lg font-semibold text-slate-800 flex items-center">
+                    <AlertTriangle className="h-5 w-5 mr-2 text-amber-500" /> Constraints
+                  </h2>
+                </div>
+                <div className="p-4 space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Min Hold Scrap (mm)</label>
+                    <p className="text-xs text-slate-500 mb-2">Required leftover for machine grip.</p>
+                    <input type="number" min="0" value={minScrap} onChange={(e) => setMinScrap(parseFloat(e.target.value) || 0)} className="w-full p-2 border border-slate-300 rounded-md focus:ring-blue-500 focus:border-blue-500" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Max Recommended Waste (mm)</label>
+                    <p className="text-xs text-slate-500 mb-2">Algorithm prefers waste below this.</p>
+                    <input type="number" min="0" value={maxWaste} onChange={(e) => setMaxWaste(parseFloat(e.target.value) || 0)} className="w-full p-2 border border-slate-300 rounded-md focus:ring-blue-500 focus:border-blue-500" />
+                  </div>
+                </div>
+              </section>
+            </div>
+
+            {/* Mother Cores */}
+            <section className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden">
+              <div className="bg-slate-100 px-4 py-3 border-b border-slate-200">
+                <h2 className="text-lg font-semibold text-slate-800 flex items-center">
+                  <Factory className="h-5 w-5 mr-2 text-blue-600" /> Available Mother Cores
+                </h2>
+              </div>
+              <div className="p-4">
+                <p className="text-sm text-slate-500 mb-4">
+                  Showing cores for <strong>{innerDiameter}" ID</strong>, <strong>{supplier}</strong>, <strong>{wallThickness}mm</strong> wall. 
+                  Select the sizes currently available in stock.
+                </p>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 max-h-64 overflow-y-auto pr-2">
+                  {filteredCores.length > 0 ? (
+                    filteredCores.map(size => {
+                      const isSelected = selectedCores[size] !== false;
+                      return (
+                        <label key={size} className={`flex items-center justify-between p-3 rounded border cursor-pointer transition-colors ${isSelected ? 'bg-blue-50 border-blue-200' : 'bg-slate-50 border-slate-200 opacity-60'}`}>
+                          <span className={`font-medium text-sm ${isSelected ? 'text-blue-800' : 'text-slate-500'}`}>{size} mm</span>
+                          <input 
+                            type="checkbox" 
+                            checked={isSelected}
+                            onChange={(e) => setSelectedCores({...selectedCores, [size]: e.target.checked})}
+                            className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500"
+                          />
+                        </label>
+                      );
+                    })
+                  ) : (
+                    <p className="text-sm text-slate-500 col-span-full">No mother cores match the selected specifications in the master database.</p>
+                  )}
+                </div>
+              </div>
+            </section>
+
+            {/* Production Plan (Setups) */}
+            <section className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden">
+              <div className="bg-slate-100 px-4 py-3 border-b border-slate-200 flex justify-between items-center">
+                <h2 className="text-lg font-semibold text-slate-800 flex items-center">
+                  <BarChart3 className="h-5 w-5 mr-2 text-blue-600" /> Slitting Plan (Setups)
+                </h2>
+                <button onClick={addSetup} className="text-sm flex items-center text-blue-600 hover:text-blue-800 font-medium">
+                  <Plus className="h-4 w-4 mr-1" /> Add Setup
+                </button>
+              </div>
+              <div className="p-4 space-y-4 max-h-[600px] overflow-y-auto">
+                {setups.map((setup, index) => (
+                  <div key={setup.id} className="bg-slate-50 border border-slate-200 rounded-lg p-4">
+                    <div className="flex justify-between items-center mb-3">
+                      <h3 className="font-semibold text-slate-700">Setup {index + 1}</h3>
+                      <button onClick={() => removeSetup(setup.id)} className="text-red-500 hover:text-red-700 p-1">
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4 mb-4">
+                      <div>
+                        <label className="block text-xs font-medium text-slate-500 uppercase mb-1">Repetitions</label>
+                        <input type="number" min="1" value={setup.repetitions || ''} onChange={(e) => updateSetup(setup.id, 'repetitions', parseInt(e.target.value) || 0)} className="w-full p-2 border border-slate-300 rounded focus:ring-blue-500 focus:border-blue-500" />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-slate-500 uppercase mb-1">Extra Core (mm)</label>
+                        <input type="number" min="0" value={setup.extra || ''} onChange={(e) => updateSetup(setup.id, 'extra', parseFloat(e.target.value) || 0)} className="w-full p-2 border border-slate-300 rounded focus:ring-blue-500 focus:border-blue-500" />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-500 uppercase mb-2">Slit Rolls (Width in mm)</label>
+                      <div className="flex flex-wrap gap-2">
+                        {setup.rolls.map(roll => (
+                          <div key={roll.id} className="flex items-center bg-white border border-slate-300 rounded overflow-hidden focus-within:ring-1 focus-within:ring-blue-500 focus-within:border-blue-500">
+                            <input 
+                              type="number" 
+                              min="0" 
+                              value={roll.width || ''} 
+                              onChange={(e) => updateRoll(setup.id, roll.id, parseFloat(e.target.value) || 0)} 
+                              className="w-20 p-1.5 outline-none text-sm" 
+                              placeholder="Width"
+                            />
+                            <button onClick={() => removeRoll(setup.id, roll.id)} className="bg-slate-100 hover:bg-red-50 text-slate-400 hover:text-red-500 px-2 py-2 border-l border-slate-200 transition-colors">
+                              <X className="h-3 w-3" />
+                            </button>
+                          </div>
+                        ))}
+                        <button onClick={() => addRoll(setup.id)} className="flex items-center px-3 py-1.5 bg-blue-50 text-blue-600 hover:bg-blue-100 border border-blue-200 rounded text-sm font-medium transition-colors">
+                          <Plus className="h-3 w-3 mr-1" /> Add Roll
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                {setups.length === 0 && (
+                  <p className="text-center text-slate-500 py-4">No setups added. Click "Add Setup" to begin.</p>
+                )}
+              </div>
+            </section>
+
+            {/* Action Buttons */}
+            <div className="flex space-x-4 pt-2">
+              <button onClick={handleReset} className="flex-1 flex justify-center items-center px-4 py-3 bg-slate-200 hover:bg-slate-300 text-slate-800 rounded-lg font-medium transition-colors">
+                <RotateCcw className="h-5 w-5 mr-2" /> Reset All
+              </button>
+              <button onClick={handleOptimize} className="flex-1 flex justify-center items-center px-4 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-bold shadow-md transition-colors">
+                <Scissors className="h-5 w-5 mr-2" /> Optimize Plan
+              </button>
+            </div>
+
+          </div>
+
+          {/* Right Column: Results */}
+          <div className="lg:col-span-7 space-y-6">
+            {results ? (
+              <>
+                {/* Summary */}
+                <section className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden">
+                  <div className="bg-blue-50 px-4 py-3 border-b border-blue-100">
+                    <h2 className="text-lg font-semibold text-blue-900 flex items-center">
+                      <BarChart3 className="h-5 w-5 mr-2" /> Optimization Summary
+                    </h2>
+                  </div>
+                  <div className="p-4 grid grid-cols-2 sm:grid-cols-4 gap-4">
+                    <div className="bg-slate-50 p-3 rounded-md border border-slate-100">
+                      <p className="text-xs text-slate-500 uppercase font-semibold">Total Required</p>
+                      <p className="text-xl font-bold text-slate-800">{totalRequiredLength} <span className="text-sm font-normal text-slate-500">mm</span></p>
+                    </div>
+                    <div className="bg-slate-50 p-3 rounded-md border border-slate-100">
+                      <p className="text-xs text-slate-500 uppercase font-semibold">Mother Core Used</p>
+                      <p className="text-xl font-bold text-blue-600">{totalMotherCoreUsed} <span className="text-sm font-normal text-slate-500">mm</span></p>
+                    </div>
+                    <div className="bg-slate-50 p-3 rounded-md border border-slate-100">
+                      <p className="text-xs text-slate-500 uppercase font-semibold">Total Waste</p>
+                      <p className="text-xl font-bold text-amber-600">{totalWaste} <span className="text-sm font-normal text-slate-500">mm</span></p>
+                    </div>
+                    <div className="bg-slate-50 p-3 rounded-md border border-slate-100">
+                      <p className="text-xs text-slate-500 uppercase font-semibold">Efficiency</p>
+                      <p className="text-xl font-bold text-emerald-600">{efficiencyPercent}%</p>
+                    </div>
+                  </div>
+                </section>
+
+                {/* Output Table */}
+                <section className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden">
+                  <div className="bg-slate-100 px-4 py-3 border-b border-slate-200">
+                    <h2 className="text-lg font-semibold text-slate-800">Cutting Plan Details</h2>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm text-left">
+                      <thead className="text-xs text-slate-500 uppercase bg-slate-50 border-b border-slate-200">
+                        <tr>
+                          <th className="px-4 py-3">Mother Core</th>
+                          <th className="px-4 py-3">Qty</th>
+                          <th className="px-4 py-3">Cuts (mm)</th>
+                          <th className="px-4 py-3">Scrap</th>
+                          <th className="px-4 py-3">Util %</th>
+                          <th className="px-4 py-3">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {results.map((r, idx) => {
+                          const utilization = ((r.used / r.size) * 100).toFixed(1);
+                          const isValid = r.scrap >= minScrap;
+                          const exceedsMax = r.scrap > maxWaste;
+                          return (
+                            <tr key={idx} className="hover:bg-slate-50">
+                              <td className="px-4 py-3 font-medium text-slate-800">{r.size} mm</td>
+                              <td className="px-4 py-3 font-bold text-blue-600">{r.qty}x</td>
+                              <td className="px-4 py-3">
+                                <div className="flex flex-wrap gap-1">
+                                  {r.cuts.map((cut, cIdx) => (
+                                    <span key={cIdx} className="inline-block bg-slate-100 text-slate-700 px-1.5 py-0.5 rounded text-xs border border-slate-200">
+                                      {cut}
+                                    </span>
+                                  ))}
+                                </div>
+                              </td>
+                              <td className={`px-4 py-3 font-medium ${exceedsMax ? 'text-red-500' : 'text-amber-600'}`}>{r.scrap} mm</td>
+                              <td className="px-4 py-3 text-slate-600">{utilization}%</td>
+                              <td className="px-4 py-3">
+                                {isValid ? (
+                                  <span className="flex items-center text-emerald-600 text-xs font-medium">
+                                    <CheckCircle2 className="h-4 w-4 mr-1" /> Valid
+                                  </span>
+                                ) : (
+                                  <span className="flex items-center text-red-600 text-xs font-medium">
+                                    <AlertTriangle className="h-4 w-4 mr-1" /> Invalid
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+
+                {/* Visual Preview */}
+                <section className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden print:break-inside-avoid">
+                  <div className="bg-slate-100 px-4 py-3 border-b border-slate-200">
+                    <h2 className="text-lg font-semibold text-slate-800">Visual Cutting Preview</h2>
+                  </div>
+                  <div className="p-4 space-y-6">
+                    {results.map((r, idx) => (
+                      <div key={idx} className="space-y-2">
+                        <div className="flex justify-between text-sm font-medium text-slate-700">
+                          <span>{r.qty}x Mother Core: {r.size} mm</span>
+                          <span className={r.scrap > maxWaste ? 'text-red-500' : 'text-amber-600'}>Scrap: {r.scrap} mm</span>
+                        </div>
+                        <div className="h-10 w-full bg-slate-100 rounded-md border border-slate-300 flex overflow-hidden relative">
+                          {r.cuts.map((cut, cIdx) => {
+                            const widthPercent = (cut / r.size) * 100;
+                            // Alternate colors for visibility
+                            const bgClass = cIdx % 2 === 0 ? 'bg-blue-500' : 'bg-blue-400';
+                            return (
+                              <div 
+                                key={cIdx} 
+                                style={{ width: `${widthPercent}%` }} 
+                                className={`${bgClass} h-full border-r border-white/30 flex items-center justify-center text-white text-xs font-bold overflow-hidden whitespace-nowrap`}
+                                title={`${cut} mm`}
+                              >
+                                {widthPercent > 3 ? cut : ''}
+                              </div>
+                            );
+                          })}
+                          {r.scrap > 0 && (
+                            <div 
+                              style={{ width: `${(r.scrap / r.size) * 100}%` }} 
+                              className={`${r.scrap > maxWaste ? 'bg-red-400 text-red-900' : 'bg-amber-400 text-amber-900'} h-full flex items-center justify-center text-xs font-bold overflow-hidden whitespace-nowrap striped-bg`}
+                              title={`Scrap: ${r.scrap} mm`}
+                            >
+                              {((r.scrap / r.size) * 100) > 3 ? `S:${r.scrap}` : ''}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              </>
+            ) : (
+              <div className="h-full min-h-[400px] bg-white rounded-lg border border-dashed border-slate-300 flex flex-col items-center justify-center text-slate-400 p-8 print:hidden">
+                <Scissors className="h-16 w-16 mb-4 text-slate-200" />
+                <h3 className="text-xl font-medium text-slate-600 mb-2">Ready to Optimize</h3>
+                <p className="text-center max-w-md">Enter your production plan, configure core specifications, and set machine constraints. Then click "Optimize" to generate the cutting plan.</p>
+              </div>
+            )}
+          </div>
+        </div>
+      </main>
+
+      {/* Reset Confirmation Modal */}
+      {showResetConfirm && (
+        <div className="fixed inset-0 bg-slate-900/50 flex items-center justify-center z-50 p-4 print:hidden">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6">
+            <div className="flex items-center text-amber-600 mb-4">
+              <AlertTriangle className="h-6 w-6 mr-2" />
+              <h3 className="text-lg font-bold text-slate-900">Reset All Inputs?</h3>
+            </div>
+            <p className="text-slate-600 mb-6">Are you sure you want to clear all setups, core specifications, and optimization results? This action cannot be undone.</p>
+            <div className="flex justify-end space-x-3">
+              <button 
+                onClick={() => setShowResetConfirm(false)}
+                className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-md font-medium transition-colors"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={confirmReset}
+                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-md font-medium transition-colors"
+              >
+                Yes, Reset Everything
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* CSS for striped background in scrap */}
+      <style dangerouslySetInnerHTML={{__html: `
+        .striped-bg {
+          background-image: repeating-linear-gradient(
+            45deg,
+            rgba(255, 255, 255, 0.2),
+            rgba(255, 255, 255, 0.2) 10px,
+            transparent 10px,
+            transparent 20px
+          );
+        }
+      `}} />
+    </div>
+  );
+}
+
